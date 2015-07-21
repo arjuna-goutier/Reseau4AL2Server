@@ -17,14 +17,18 @@ typedef bool Activity;
 #define INACTIVE_STRING "inactive"
 #define MAX_NUMBER_OF_CONNECTION 255
 typedef unsigned char ID;
-#define FIRST_ID 1
 #define SOCK_FLG 0
 #define MESSAGE_SIZE 2
 #define SOCK_PROTO 0
 #define PORT 3000
+#define DISPLAY_PORT 3001
 #define CONNECTION_FINISHED 0
 #define READ_FAILED -1
 #define SOCKET_ERROR -1
+#define ACTION_LIST 0
+#define FIRST_ID 1
+#define NOT_CONNECTED -1
+#define MAX_LIST_LENGTH MAX_NUMBER_OF_CONNECTION * 2 + 1
 typedef int Socket;
 typedef int IOresult;
 //structure to be passed to the thread
@@ -35,13 +39,12 @@ struct ClientIdPair {
 
 Socket clients[MAX_NUMBER_OF_CONNECTION];
 Activity robotsActivity[MAX_NUMBER_OF_CONNECTION];
-unsigned int number_of_connection = 0;
-Socket server;
+//unsigned int numberOfConnection = 0;
+ID nextId = FIRST_ID;
 
 //one thread per connection. Application need more speed than memory efficiency
 pthread_t threads[MAX_NUMBER_OF_CONNECTION];
-struct sockaddr_in serverAdress;
-
+pthread_t threadsDisplay[MAX_NUMBER_OF_CONNECTION];
 void sendMessage(Socket client, char* message) {
 	write(client, message,strlen(message));
 }
@@ -51,137 +54,175 @@ ID getNextId() {
 	return next++;
 }
 
-void disconect(ID id) {
-	printf("%d disconnected\n",id);
-}
-
-void connection() {
-	robotsActivity[getNextId()] = inactive;
-	++number_of_connection;
-}
-
 char* activityToString(Activity activity) {
-	if(activity == inactive)
+	if (activity == inactive)
 		return INACTIVE_STRING;
 	return ACTIVE_STRING;
 }
 
 void setEtat(ID id, Activity activity) {
-	printf("%d become %s\n",id,activityToString(activity));
+	printf("%d become %s\n", id, activityToString(activity));
 	robotsActivity[id] = activity;
 }
 
-void printEtat(ID id) {
-	printf("%d%d",id,robotsActivity[id]);
+
+void sendState(Socket socket, ID id) {
+	char message[2];
+	printf("sending %d -> %d",id,robotsActivity[id]);
+	message[0] = id;
+	message[1] = robotsActivity[id];
+	write(socket, message, 2);
 }
 
-void send_state(ID id) {
-	printEtat(id);
-}
-
-void send_list() {
-	for(unsigned int i = 0; i < number_of_connection;++i)
-		printEtat((ID)i);
+void sendList(Socket connection) {
+	char message[MAX_LIST_LENGTH];
+	for (int i = 0; i < MAX_LIST_LENGTH;++i)
+		message[i] = 0;
+	printf("sending %u states\n",nextId - 1);
+	for (ID id = FIRST_ID; id <= nextId - 1; ++id) {
+		message[((id - 1) * 2) + 1] = id;
+		message[((id - 1) * 2) + 2] = robotsActivity[id];
+	}
+	write(connection, message, MAX_LIST_LENGTH);
 }
 
 void handle_message(ID id, Activity activity) {
 	setEtat(id,activity);
 }
-void receiveConnection() {
-
-}
 
 void sendId(Socket client, ID id) {
 	char message[1];
-	sprintf(message, "%c",id);
-	sendMessage(client, message);
+	message[0] = id;
+	write(client, message, 1);
 }
 /**
  * @brief handle_client handle a robot during his connection
  * @param passedClient the socket member
  */
-void* handle_client(void* passedClient) {
+void* handle_robot(void* passedClient) {
 	struct ClientIdPair clientIdPaire = *(struct ClientIdPair*) passedClient;
-
 	sendId(clientIdPaire.client, clientIdPaire.id);
 	char message[MESSAGE_SIZE];
 	Activity activity;
-	while(true) {
+	while (true) {
+		IOresult result = read(clientIdPaire.client,message,MESSAGE_SIZE);
+		if (result == READ_FAILED)
+			break;
+		if (result == READ_FAILED || result == CONNECTION_FINISHED)
+			break;
+		printf("message received : %s\n",message);
+		activity = message[1];
+		printf("translated to : id = %u; tpm = %u -> activity = %u;\n",
+				message[0], message[1], activity);
+		setEtat(clientIdPaire.id,activity);
+	}
+	close(clientIdPaire.client);
+	return 0;
+}
+void* handle_display(void* passedClient) {
+	struct ClientIdPair clientIdPaire = *(struct ClientIdPair*) passedClient;
+	//sendId(clientIdPaire.client, clientIdPaire.id);
+	char message[MESSAGE_SIZE];
+	unsigned char action;
+	while (true) {
 		IOresult result = read(clientIdPaire.client,message,MESSAGE_SIZE);
 		if(result == READ_FAILED)
 			break;
 		if(result == READ_FAILED || result == CONNECTION_FINISHED)
 			break;
 		printf("message received : %s\n",message);
-		activity = message[1];
-		printf("translated to : id = %u; tpm = %u -> activity = %u; test = %d;\n",
-				message[0], message[1], activity,message[2]);
-		setEtat(clientIdPaire.id,activity);
+
+		action = message[0];
+		printf("translated to %d\n",action);
+		if (action == ACTION_LIST) {
+			printf("send list\n");
+			sendList(clientIdPaire.client);
+		} else {
+			printf("send state");
+			sendState(clientIdPaire.client, action);
+		}
 	}
 	close(clientIdPaire.client);
 	return 0;
 }
-
-void waitConnection() {
+void waitConnection(Socket server,void (*toDo(void*)),ID id, pthread_t thread) {
 	struct sockaddr_in clientAdress;
 	struct ClientIdPair clientIdPair;
+	//ID i = 0;
+
 	unsigned int size = sizeof(clientAdress);
 	printf("waiting for connection\n");
 	clientIdPair.client = accept(server, (struct sockaddr*)&clientAdress, &size);
 	//check for error
-	if(clientIdPair.client == SOCKET_ERROR) {
+	if (clientIdPair.client == SOCKET_ERROR){
 		perror("accept");
 		exit(1);
 	}
-	clientIdPair.id = getNextId();
-	pthread_create(&threads[clientIdPair.id],NULL,handle_client,(void*)&clientIdPair);
+	clientIdPair.id = id;
+	pthread_create(&thread,NULL,toDo,(void*)&clientIdPair);
 	//a faire dans un nouveau thread
 	printf("connected : socket %d\n",clientIdPair.client);
 	//handle_client((void*)&client);
 }
-void test() {
-	void test2();
-}
 
-void prepareServer() {
+Socket prepareServer(int port) {
+	struct sockaddr_in serverAdress;
+	Socket server;
+
 	printf("starting server\n");
 	printf("preparing taken adress\n");
 	bzero((char *)&serverAdress, sizeof(serverAdress));
 	serverAdress.sin_family = AF_INET;
-	serverAdress.sin_addr.s_addr = INADDR_ANY; /* hôte local */
-	serverAdress.sin_port = htons(PORT); /* PORT */
+	serverAdress.sin_addr.s_addr = INADDR_ANY;
+	serverAdress.sin_port = htons(port);
 
-	server = socket(AF_INET,SOCK_STREAM, SOCK_PROTO); /* UDP */
+	server = socket(AF_INET,SOCK_STREAM, SOCK_PROTO);
 
 	if (server == -1) {
 		perror("erreur lors de la creation du serveur\n");
-		return;
+		return server;
 	}
-	printf("bind server to port %d\n",PORT);
+	printf("bind server to port %d\n", port);
 	bind(server,(struct sockaddr*)&serverAdress,sizeof(serverAdress));
 	printf("sarting to listen\n");
 	listen(server,MAX_NUMBER_OF_CONNECTION);
 	printf("server started\n");
+	return server;
 }
 
-void waitConnections() {
-	while(true)
-		waitConnection();
+void waitConnectionsGlobal(Socket server, void* (*toDO)(void*),pthread_t threads[]) {
+	for(nextId = FIRST_ID; nextId < MAX_NUMBER_OF_CONNECTION; ++nextId)
+		waitConnection(server, toDO, nextId,threads[nextId]);
 }
 
-void closeServer() {
+void waitConnections(Socket server, void* (*toDO)(void*),pthread_t threads[]) {
+	for(ID id = FIRST_ID; id < MAX_NUMBER_OF_CONNECTION; ++id)
+		waitConnection(server, toDO, nextId,threads[nextId]);
+}
+
+
+void closeServer(Socket server) {
 	shutdown(server,SHUT_RDWR);// clos en RW
 	close(server);
 }
 
 void runServer() {
-	prepareServer();
-	waitConnections();
-	closeServer();
+	Socket server = prepareServer(PORT);
+	waitConnectionsGlobal(server, handle_robot, threads);
+	closeServer(server);
+}
+void* runDisplayServer(void* t) {
+	Socket server = prepareServer(DISPLAY_PORT);
+	waitConnections(server, handle_display, threadsDisplay);
+	closeServer(server);
+	return 0;
 }
 
 int main(void)
 {
+	pthread_t displayThread;
+	pthread_create(&displayThread, NULL, runDisplayServer, (void*)NULL);
+
 	runServer();
 	return 0;
 }
